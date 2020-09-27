@@ -4,7 +4,6 @@ import torch
 from torchvision import transforms
 import torchvision
 import os
-from models.vgg import VGG
 
 # Initialize the network
 class VGG11(nn.Module):
