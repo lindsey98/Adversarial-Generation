@@ -112,7 +112,8 @@ if __name__ == '__main__':
     '''define model'''
     print("CUDA Available: ", torch.cuda.is_available())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    criterion = nn.CrossEntropyLoss()
+    
     # Initialize the network
     model = VGG11()
     model.to(device)
