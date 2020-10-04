@@ -3,6 +3,9 @@ Investigate the distribution of signal
 
 
 # Related Work
+
+Please refer to the summary.docx for details
+
 - Li, Xin, and Fuxin Li. "Adversarial examples detection in deep networks with convolutional filter statistics." Proceedings of the IEEE International Conference on Computer Vision. 2017. 
 - Lu, Jiajun, Theerasit Issaranon, and David Forsyth. "Safetynet: Detecting and rejecting adversarial examples robustly." Proceedings of the IEEE International Conference on Computer Vision. 2017.
 - Metzen, Jan Hendrik, et al. "On detecting adversarial perturbations." arXiv preprint arXiv:1702.04267 (2017).
