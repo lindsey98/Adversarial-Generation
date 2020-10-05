@@ -5,6 +5,7 @@ os.chdir('..')
 from dataloader import *
 from models.vgg import VGG11
 import argparse
+import sys
 
 import torch
 import torch.nn as nn
@@ -66,7 +67,11 @@ class adversarial_attack():
                 perturbed_data = self._deep_fool(data, label, I, overshoot=0.02, max_iter=100)
                 
             elif self.method == 'cw':
-                perturbed_data = self._cw(data, label, targeted=False, c=1e-4, kappa=0, max_iter=500, learning_rate=0.01)
+                # randomly select a target class
+                target_class = init_pred
+                while target_class == init_pred:
+                    target_class = torch.randint(0, output.size()[1], (1,)).to(self.device)
+                perturbed_data = self._cw(data, target_class, max_steps=1000, clip_min=0.0, clip_max=1.0)
                 
             else:
                 print('Attack method is not supported')
@@ -81,16 +86,16 @@ class adversarial_attack():
             if final_pred.item() == label.item():
                 correct += 1  # still correct
             else:# save successful attack
-                if ct_save <= 100:
+                if ct_save < 100:
                     if self.save_data:
-                        os.makedirs('./data/normal_{}'.format(attack_method), exist_ok=True)
-                        os.makedirs('./data/adversarial_{}'.format(attack_method), exist_ok=True)
+                        os.makedirs('./data/normal_{}'.format(self.method), exist_ok=True)
+                        os.makedirs('./data/adversarial_{}'.format(self.method), exist_ok=True)
                         # Save the original instance
                         torch.save((data.detach().cpu(), init_pred.detach().cpu()),
-                                   './data/normal_{}/{}.pt'.format(attack_method, ct_save))
+                                   './data/normal_{}/{}.pt'.format(self.method, ct_save))
                         # Save the adversarial example
                         torch.save((perturbed_data.detach().cpu(), final_pred.detach().cpu()),
-                                   './data/adversarial_{}/{}.pt'.format(attack_method, ct_save))
+                                   './data/adversarial_{}/{}.pt'.format(self.method, ct_save))
                 ct_save += 1
 
 
@@ -291,69 +296,234 @@ class adversarial_attack():
 
         return x.data
     
-    def _cw(self, image, label, targeted=False, c=1e-4, kappa=0, max_iter=500, learning_rate=0.01):
-        '''https://github.com/Harry24k/CW-pytorch/blob/master/CW.ipynb
-           Launch C&W-L2 attack for a single image
+    def _cw(self, image, target, max_steps=1000, clip_min=0.0, clip_max=1.0):
+        '''https://github.com/rwightman/pytorch-nips2017-attack-example/blob/master/attacks/attack_carlini_wagner_l2.py
+           C&W L2 attack
            Parameters:
                image: input image
-               label: gt label
-               targeted: targeted attack or untargeted attack, default is False
-               c: trade-off parameter 
-               kappa: margin
-               max_iter: maximum iterations allowed for attack
-               learning_rate: learning rate in optimization
-           Returns:
-               perturbed image
+               target: adv target class
+               max_steps: maximum iterations of optimization
+               clip_min, clip_max: clip image into legal range
         '''
-        image, label = image.to(self.device), label.to(self.device)
+        
+        confidence = 20  # FIXME need to find a good value for this, 0 value used in paper not doing much...
+        initial_const = 0.1  # bumped up from default of .01 in reference code
+        binary_search_steps = 5
+        repeat = binary_search_steps >= 10
+        abort_early = True
+        debug = False
+        batch_idx = 0
 
-        # Define helper function for c&w attack
-        def f(x):
-            '''Return the c'''
-            output, _ = self.model(x)
-            one_hot_label = torch.eye(len(output[0]))[label].to(self.device)
+        def reduce_sum(x, keepdim=True):
+            '''Helper function
+               Perform sum on all dimension except for batch dim
+            '''
+            for a in reversed(range(1, x.dim())):
+                x = x.sum(a, keepdim=keepdim)
+            return x
 
-            i, _ = torch.max((1-one_hot_label)*output, dim=1) # maximum confidence for other class
-            j = torch.masked_select(output, one_hot_label.byte().bool()) # confidence for ground-truth class
+        def l2_dist(x, y, keepdim=True):
+            '''Helper function
+               Compute L2-dist
+            '''
+            d = (x - y)**2
+            return reduce_sum(d, keepdim=keepdim)
 
-            # If targeted, optimize for making the other class most likely 
-            if targeted:
-                return torch.clamp(i-j, min=-kappa)
+        def torch_arctanh(x, eps=1e-6):
+            '''Helper function
+               Implement arctanh function
+            '''
+            x *= (1. - eps)
+            return (torch.log((1 + x) / (1 - x))) * 0.5
 
-            # If untargeted, optimize for making the other class most likely 
+        def tanh_rescale(x, x_min=0., x_max=1.):
+            '''Helper function
+               Implement tanh function
+            '''
+            return (torch.tanh(x) + 1) * 0.5 * (x_max - x_min) + x_min
+
+        def compare(output, target):
+            '''Helper function
+               Compare predicted value with ground-truth
+            '''
+            if not isinstance(output, (float, int, np.int64)):
+                output = np.copy(output)
+                output[target] -= confidence
+                output = np.argmax(output)
+            return output == target
+
+        def cal_loss(output, target, dist, scale_const):
+            '''Helper function
+               Compute loss for C&W L2
+            '''
+            # compute the probability of the label class versus the maximum other
+            real = (target * output).sum(1)
+            other = ((1. - target) * output - target * 10000.).max(1)[0]
+            # if targeted, optimize for making the other class most likely
+            loss1 = torch.clamp(other - real + confidence, min=0.)  # equiv to max(..., 0.)
+            loss1 = torch.sum(scale_const * loss1)
+
+            loss2 = dist.sum()
+
+            loss = loss1 + loss2
+            return loss
+
+
+        def optimize(optimizer, input_var, modifier_var, target_var, scale_const_var, input_orig=None):
+            '''Helper function
+               Optimize C&W L2 loss by Adam
+            '''
+            # apply modifier and clamp resulting image to keep bounded from clip_min to clip_max
+            input_adv = tanh_rescale(modifier_var + input_var, clip_min, clip_max)
+
+            output, _ = self.model(input_adv)
+
+            # distance to the original input data
+            if input_orig is None:
+                dist = l2_dist(input_adv, input_var, keepdim=False)
             else:
-                return torch.clamp(j-i, min=-kappa)
+                dist = l2_dist(input_adv, input_orig, keepdim=False)
 
-        w = torch.zeros_like(image, requires_grad=True).to(self.device)
-        optimizer = optim.Adam([w], lr=learning_rate)
-        prev = 1e10
-
-        # Stop until reach the maximum iteration or loss starts diverging
-        for step in range(max_iter) :
-
-            a = 1/2*(nn.Tanh()(w) + 1)
-
-            loss1 = nn.MSELoss(reduction='sum')(a, image)
-            loss2 = torch.sum(c*f(a))
-
-            cost = loss1 + loss2
+            loss = cal_loss(output, target_var, dist, scale_const_var)
 
             optimizer.zero_grad()
-            cost.backward()
+            loss.backward()
             optimizer.step()
 
-            # Early Stop when loss does not converge.
-            if step % (max_iter//10) == 0:
-                if cost > prev:
-                    print('Attack Stopped since loss starts increasing....')
-                    return a
-                prev = cost
+            loss_np = loss.item()
+            dist_np = dist.data.detach().cpu().numpy()
+            output_np = output.data.detach().cpu().numpy()
+            input_adv_np = input_adv.data # back to BHWC for numpy consumption
+            return loss_np, dist_np, output_np, input_adv_np
 
-            print('- Learning Progress : %2.2f %%' %((step+1)/max_iter*100), end='\r')
+        batch_size = image.size(0)
 
-        attack_image = 1/2*(nn.Tanh()(w) + 1)
+        # set the lower and upper bounds accordingly
+        lower_bound = np.zeros(batch_size)
+        scale_const = np.ones(batch_size) * initial_const
+        upper_bound = np.ones(batch_size) * 1e10
 
-        return attack_image
+        # python/numpy placeholders for the overall best l2, label score, and adversarial image
+        o_best_l2 = [1e10] * batch_size
+        o_best_score = [-1] * batch_size
+        o_best_attack = image
+        
+        # setup input (image) variable, clamp/scale as necessary
+        # convert to tanh-space, input already int -1 to 1 range, does it make sense to do
+        # this as per the reference implementation or can we skip the arctanh?
+        input_var = Variable(torch_arctanh(image), requires_grad=False)
+        input_orig = tanh_rescale(input_var, clip_min, clip_max)
+
+        # setup the target variable, we need it to be in one-hot form for the loss function
+        target_onehot = torch.zeros(target.size() + (self.num_classes,)).to(self.device)
+        target_onehot.scatter_(1, target.unsqueeze(1), 1.)
+        target_var = Variable(target_onehot, requires_grad=False)
+
+        # setup the modifier variable, this is the variable we are optimizing over
+        modifier = torch.zeros(input_var.size()).float()
+        modifier = modifier.to(self.device)
+        modifier_var = Variable(modifier, requires_grad=True)
+
+        optimizer = optim.Adam([modifier_var], lr=0.0005)
+
+        for search_step in range(binary_search_steps):
+            print('Batch: {0:>3}, search step: {1}'.format(batch_idx, search_step))
+            if debug:
+                print('Const:')
+                for i, x in enumerate(scale_const):
+                    print(i, x)
+            best_l2 = [1e10] * batch_size
+            best_score = [-1] * batch_size
+
+            # The last iteration (if we run many steps) repeat the search once.
+            if repeat and search_step == binary_search_steps - 1:
+                scale_const = upper_bound
+
+            scale_const_tensor = torch.from_numpy(scale_const).float()
+            scale_const_tensor = scale_const_tensor.to(self.device)
+            scale_const_var = Variable(scale_const_tensor, requires_grad=False)
+
+            prev_loss = 1e6
+            for step in range(max_steps):
+                # perform the attack
+                loss, dist, output, adv_img = optimize(
+                    optimizer,
+                    input_var,
+                    modifier_var,
+                    target_var,
+                    scale_const_var,
+                    input_orig)
+
+                if step % 100 == 0 or step == max_steps - 1:
+                    print('Step: {0:>4}, loss: {1:6.4f}, dist: {2:8.5f}, modifier mean: {3:.5e}'.format(
+                        step, loss, dist.mean(), modifier_var.data.mean()))
+
+                if abort_early and step % (max_steps // 10) == 0:
+                    if loss > prev_loss * .9999:
+                        print('Aborting early...')
+                        break
+                    prev_loss = loss
+
+                # update best result found
+                for i in range(batch_size):
+                    target_label = target[i]
+                    output_logits = output[i]
+                    output_label = np.argmax(output_logits)
+                    di = dist[i]
+                    if debug:
+                        if step % 100 == 0:
+                            print('{0:>2} dist: {1:.5f}, output: {2:>3}, {3:5.3}, target {4:>3}'.format(
+                                i, di, output_label, output_logits[output_label], target_label))
+                    if di < best_l2[i] and compare(output_logits, target_label):
+                        if debug:
+                            print('{0:>2} best step,  prev dist: {1:.5f}, new dist: {2:.5f}'.format(
+                                  i, best_l2[i], di))
+                        best_l2[i] = di
+                        best_score[i] = output_label
+                    if di < o_best_l2[i] and compare(output_logits, target_label):
+                        if debug:
+                            print('{0:>2} best total, prev dist: {1:.5f}, new dist: {2:.5f}'.format(
+                                  i, o_best_l2[i], di))
+                        o_best_l2[i] = di
+                        o_best_score[i] = output_label
+                        o_best_attack[i] = adv_img[i]
+
+                sys.stdout.flush()
+                # end inner step loop
+
+            # adjust the constants
+            batch_failure = 0
+            batch_success = 0
+            for i in range(batch_size):
+                if compare(best_score[i], target[i]) and best_score[i] != -1:
+                    # successful, do binary search and divide const by two
+                    upper_bound[i] = min(upper_bound[i], scale_const[i])
+                    if upper_bound[i] < 1e9:
+                        scale_const[i] = (lower_bound[i] + upper_bound[i]) / 2
+                    if debug:
+                        print('{0:>2} successful attack, lowering const to {1:.3f}'.format(
+                            i, scale_const[i]))
+                else:
+                    # failure, multiply by 10 if no solution found
+                    # or do binary search with the known upper bound
+                    lower_bound[i] = max(lower_bound[i], scale_const[i])
+                    if upper_bound[i] < 1e9:
+                        scale_const[i] = (lower_bound[i] + upper_bound[i]) / 2
+                    else:
+                        scale_const[i] *= 10
+                    if debug:
+                        print('{0:>2} failed attack, raising const to {1:.3f}'.format(
+                            i, scale_const[i]))
+                if compare(o_best_score[i], target[i]) and o_best_score[i] != -1:
+                    batch_success += 1
+                else:
+                    batch_failure += 1
+
+            print('Num failures: {0:2d}, num successes: {1:2d}\n'.format(batch_failure, batch_success))
+            sys.stdout.flush()
+            # end outer search loop
+
+        return o_best_attack
     
     
 if __name__ == '__main__':
