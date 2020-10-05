@@ -1,6 +1,23 @@
 # Network_Signal
 Investigate the distribution of signal
 
+# Background
+We believe that for normal examples and adversarial examples. The triggering patterns for internal NN layer are significantly different. In this repository, we aim to verify this hypothesis. 
+
+# Project Structure
+```
+
+|
+| utils.py: functions that enable partial model execution
+| compare_distribution: estimate distribution by Gaussian KDE and compute the KL divergence between two distributions
+| dataloader: load training/testing data from CIFAR10
+| train.py: train a reference model
+|
+|___ models: different model architecture
+|___ attack: FGSM/Step-LL, DeepFool, JSMA, C&W L2 attack
+
+
+```
 
 # Related Work
 
