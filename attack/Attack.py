@@ -39,74 +39,76 @@ class adversarial_attack():
         adv_cat = torch.tensor([])
 
         # Loop over all examples in test set
-        for data, label in self.dataloader:
+        for ct, (data, label) in enumerate(self.dataloader):
             data, label = data.to(self.device), label.to(self.device)
 
             # Forward pass the data through the model
-            output, _ = self.model(data)
+#             output, _ = self.model(data)
+            output = self.model(data)
+            self.model.zero_grad()
             init_pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
 
             if init_pred.item() != label.item():  # initially was incorrect --> no need to generate adversary
+                total += 1
+                print(ct)
                 continue
 
             # Call Attack
             if self.method in ['fgsm', 'stepll']:
                 criterion = nn.CrossEntropyLoss()
-                perturbed_data = self._FGSM(data, label, criterion, epsilon=0.05, clip_min=0.0, clip_max=1.0)
+                perturbed_data = self._FGSM(data, label, criterion)
                 
             elif self.method == 'jsma':
                 # randomly select a target class
                 target_class = init_pred
                 while target_class == init_pred:
                     target_class = torch.randint(0, output.size()[1], (1,)).to(self.device)
-                perturbed_data = self._JSMA(data, target_class, max_iter=100, clip_min=0.0, clip_max=1.0)
+                perturbed_data = self._JSMA(data, target_class)
                 
             elif self.method == 'deepfool':
                 f_image = output.detach().cpu().numpy().flatten()
                 I = (np.array(f_image)).flatten().argsort()[::-1]
-                perturbed_data = self._deep_fool(data, label, I, overshoot=0.02, max_iter=100)
+                perturbed_data = self._deep_fool(data, label, I)
                 
             elif self.method == 'cw':
                 # randomly select a target class
                 target_class = init_pred
                 while target_class == init_pred:
                     target_class = torch.randint(0, output.size()[1], (1,)).to(self.device)
-                perturbed_data = self._cw(data, target_class, max_steps=1000, clip_min=0.0, clip_max=1.0)
+                perturbed_data = self._cw(data, target_class, max_steps=1000)
                 
             else:
                 print('Attack method is not supported')
                 
+            self.model.zero_grad()
             # Re-classify the perturbed image
             self.model.eval()
             with torch.no_grad():
-                output, _ = self.model(perturbed_data)
+#                 output, _ = self.model(perturbed_data)
+                output = self.model(perturbed_data)
 
             # Check for success
             final_pred = output.max(1, keepdim=True)[1]
-            if final_pred.item() == label.item():
+            if final_pred.item() == init_pred.item():
                 correct += 1  # still correct
             else:# save successful attack
-                if ct_save < 100:
-                    if self.save_data:
-                        os.makedirs('./data/normal_{}'.format(self.method), exist_ok=True)
-                        os.makedirs('./data/adversarial_{}'.format(self.method), exist_ok=True)
-                        # Save the original instance
-                        torch.save((data.detach().cpu(), init_pred.detach().cpu()),
-                                   './data/normal_{}/{}.pt'.format(self.method, ct_save))
-                        # Save the adversarial example
-                        torch.save((perturbed_data.detach().cpu(), final_pred.detach().cpu()),
-                                   './data/adversarial_{}/{}.pt'.format(self.method, ct_save))
-                ct_save += 1
-
-
-#             else:  # attack is successful, final class is cat
-#                 if final_pred.item() == 3:
-#                     adv_cat = torch.cat([adv_cat, perturbed_data.detach().cpu()], dim=0)
-#                     torch.save(adv_cat, './data/adv_cat_%s.pt'%self.method)
+                print(final_pred)
+                print(init_pred)
+                if self.save_data:
+                    os.makedirs('./data/normal_{}'.format(self.method), exist_ok=True)
+                    os.makedirs('./data/adversarial_{}'.format(self.method), exist_ok=True)
+                    # Save the original instance
+                    torch.save((data.detach().cpu(), init_pred.detach().cpu()),
+                               './data/normal_{}/{}.pt'.format(self.method, ct_save))
+                    # Save the adversarial example
+                    torch.save((perturbed_data.detach().cpu(), final_pred.detach().cpu()),
+                               './data/adversarial_{}/{}.pt'.format(self.method, ct_save))
 
             adv_ex = perturbed_data.squeeze().detach().cpu().numpy()
             adv_examples.append((init_pred.item(), final_pred.item(), adv_ex))
             total += 1
+            print(ct)
+            
 
         # Calculate final accuracy
         final_acc = correct / float(len(self.dataloader))
@@ -117,7 +119,7 @@ class adversarial_attack():
         
         
         
-    def _FGSM(self, image, label, criterion, epsilon=0.05, clip_min=0.0, clip_max=1.0):
+    def _FGSM(self, image, label, criterion, max_iter=100, epsilon=0.05, clip_min=-1.0, clip_max=1.0):
         ''' https://pytorch.org/tutorials/beginner/fgsm_tutorial.html
         FGSM attack
         Parameters:
@@ -131,33 +133,44 @@ class adversarial_attack():
         pert_image = copy.deepcopy(image)
         x = Variable(pert_image, requires_grad=True)
 
-        output, _ = self.model(x)
-
-        if self.method == 'fgsm':
-            loss = criterion(output, label)  # loss for ground-truth class
-        else:
-            ll = output.min(1, keepdim=True)[1][0]
-            loss = criterion(output, ll)  # Loss for least-likely class
-
-        # Back propogation
-        self.model.zero_grad()
-        loss.backward()
-
-        # Collect the sign of the data gradient
-        sign_data_grad = torch.sign(x.grad.data)
-
-        # Create the perturbed image by adjusting each pixel of the input image
-        if self.method == 'fgsm':
-            perturbed_image = image + epsilon * sign_data_grad
-        else:
-            perturbed_image = image - epsilon * sign_data_grad
-
-        # Adding clipping to maintain [0,1] range
-        perturbed_image = torch.clamp(perturbed_image, clip_min, clip_max)
-
-        return perturbed_image
+        output = self.model(x)
+        pred = output.max(1, keepdim=True)[1]
+        iter_ct = 0
         
-    def _JSMA(self, image, target, max_iter=100, clip_min=0.0, clip_max=1.0):
+        while pred == label:
+            if self.method == 'fgsm':
+                loss = criterion(output, label)  # loss for ground-truth class
+            else:
+                ll = output.min(1, keepdim=True)[1][0]
+                loss = criterion(output, ll)  # Loss for least-likely class
+
+            # Back propogation
+            zero_gradients(x)
+            self.model.zero_grad()
+            loss.backward()
+
+            # Collect the sign of the data gradient
+            sign_data_grad = torch.sign(x.grad.data.detach())
+
+            # Create the perturbed image by adjusting each pixel of the input image
+            if self.method == 'fgsm':
+                x.data = x.data + epsilon * sign_data_grad
+            else:
+                x.data = x.data - epsilon * sign_data_grad
+
+            # Adding clipping to maintain [0,1] range
+            
+            x.data = torch.clamp(x.data, clip_min, clip_max)
+            output = self.model(x)
+            pred = output.max(1, keepdim=True)[1]
+            
+            iter_ct += 1
+            if iter_ct >= max_iter:
+                break
+
+        return x.data
+        
+    def _JSMA(self, image, target, max_iter=100, clip_min=-1.0, clip_max=1.0):
         '''https://github.com/ast0414/adversarial-example/blob/master/craft.py
         Saliency map attack
         Parameters:
@@ -177,6 +190,7 @@ class adversarial_attack():
 
             for i in range(self.num_classes):
                 zero_gradients(inputs)
+                self.model.zero_grad()
                 output[0, i].backward(retain_graph=True)
                 jacobian[i] = inputs.grad.data
 
@@ -186,17 +200,16 @@ class adversarial_attack():
         def saliency_map(jacobian, search_space, target_index):
             '''Helper function: compute saliency map and select the maximum index'''
             jacobian = jacobian.squeeze(0)
-            alpha = jacobian[target_index]
-            beta = jacobian.sum(0) - alpha
-
+            alpha = jacobian[target_index].sum(0).sum(0)
+            beta = jacobian.sum(0).sum(0) - alpha
+            
+            # filter by the sign of alpha and beta
             mask1 = torch.ge(alpha, 0.0)
             mask2 = torch.le(beta, 0.0)
-
             mask = torch.mul(torch.mul(mask1, mask2), search_space)
-
             saliency_map = torch.mul(torch.mul(alpha, torch.abs(beta)), mask.float())
-            saliency_map = saliency_map.sum(0).sum(0)
-
+            
+            # get the maximum index
             row_idx, col_idx = (saliency_map == torch.max(saliency_map)).nonzero()[0]
             return row_idx, col_idx
 
@@ -205,14 +218,15 @@ class adversarial_attack():
         pert_image = copy.deepcopy(image)
         x = Variable(pert_image, requires_grad=True)
 
-        output, _ = self.model(x)
-        _, label = torch.max(output.data, 1)
+        output = self.model(x)
+        label = output.max(1, keepdim=True)[1]
         
         count = 0
         # if attack is successful or reach the maximum number of iterations
         while (count < max_iter) and (label != target):
-
-            search_space = (x.data[0] > clip_min) & (x.data[0] < clip_max)
+            
+            # Skip the pixels that have been attacked before
+            search_space = (x.data[0].sum(0) > clip_min*x.data.shape[1]) & (x.data[0].sum(0) < clip_max*x.data.shape[1])
 
             # Calculate Jacobian
             jacobian = compute_jacobian(x, output)
@@ -224,16 +238,18 @@ class adversarial_attack():
             x.data[0, :, row_idx, col_idx] = clip_max
 
             # recompute prediction
-            output, _ = self.model(x)
+            output = self.model(x)
             label = output.max(1, keepdim=True)[1]
 
             count += 1
+            if count >= max_iter:
+                break
 
         return x.data
     
     
     
-    def _deep_fool(self, image, label, I, overshoot=0.02, max_iter=100):
+    def _deep_fool(self, image, label, I, overshoot=0.02, max_iter=100, clip_min=-1.0, clip_max=1.0):
         '''https://github.com/LTS4/DeepFool/tree/master/Python
         DeepFool attack
         Parameters:
@@ -253,7 +269,7 @@ class adversarial_attack():
         loop_i = 0
 
         x = Variable(pert_image, requires_grad=True)
-        fs, _ = self.model(x)
+        fs = self.model(x)
         fs_list = [fs[0, I[k]] for k in range(self.num_classes)]
         k_i = label
 
@@ -261,20 +277,25 @@ class adversarial_attack():
         while k_i == label and loop_i < max_iter:
 
             pert = np.inf
+            zero_gradients(x)
+            self.model.zero_grad()
             fs[0, I[0]].backward(retain_graph=True) # backpropogate the maximum confidence score
             grad_orig = x.grad.data.detach().cpu().numpy().copy()
 
             for k in range(1, self.num_classes):
                 zero_gradients(x)
-
+                self.model.zero_grad()
                 fs[0, I[k]].backward(retain_graph=True)
                 cur_grad = x.grad.data.detach().cpu().numpy().copy()
 
                 # set new w_k and new f_k
                 w_k = cur_grad - grad_orig
                 f_k = (fs[0, I[k]] - fs[0, I[0]]).data.detach().cpu().numpy()
-
-                pert_k = abs(f_k)/np.linalg.norm(w_k.flatten())
+                
+                if np.linalg.norm(w_k.flatten()) == 0.0: # if w_k is all zero, no perturbation at all
+                    pert_k = 0.0 * abs(f_k)
+                else:
+                    pert_k = abs(f_k)/np.linalg.norm(w_k.flatten())
 
                 # determine which w_k to use
                 if pert_k < pert:
@@ -283,20 +304,26 @@ class adversarial_attack():
 
             # compute r_i and r_tot
             # Added 1e-4 for numerical stability
-            r_i =  (pert+1e-4) * w / np.linalg.norm(w)
+            if np.linalg.norm(w) == 0.0:
+                r_i = (pert+1e-4) * w
+            else:
+                r_i =  (pert+1e-4) * w / np.linalg.norm(w)
             r_tot = np.float32(r_tot + r_i)
 
             pert_image = image + (1+overshoot)*torch.from_numpy(r_tot).cuda()
+            pert_image = torch.clamp(pert_image, clip_min, clip_max)
 
             x = Variable(pert_image, requires_grad=True)
-            fs, _ = self.model(x)
+            fs = self.model(x)
             k_i = np.argmax(fs.data.detach().cpu().numpy().flatten())
 
             loop_i += 1
+            if loop_i >= max_iter:
+                break
 
         return x.data
     
-    def _cw(self, image, target, max_steps=1000, clip_min=0.0, clip_max=1.0):
+    def _cw(self, image, target, max_steps=1000, clip_min=-1.0, clip_max=1.0):
         '''https://github.com/rwightman/pytorch-nips2017-attack-example/blob/master/attacks/attack_carlini_wagner_l2.py
            C&W L2 attack
            Parameters:
@@ -376,7 +403,8 @@ class adversarial_attack():
             # apply modifier and clamp resulting image to keep bounded from clip_min to clip_max
             input_adv = tanh_rescale(modifier_var + input_var, clip_min, clip_max)
 
-            output, _ = self.model(input_adv)
+#             output, _ = self.model(input_adv)
+            output = self.model(x)
 
             # distance to the original input data
             if input_orig is None:
@@ -387,6 +415,7 @@ class adversarial_attack():
             loss = cal_loss(output, target_var, dist, scale_const_var)
 
             optimizer.zero_grad()
+            self.model.zero_grad()
             loss.backward()
             optimizer.step()
 
