@@ -108,7 +108,7 @@ class adversarial_attack():
             adv_examples.append((init_pred.item(), final_pred.item(), adv_ex))
             total += 1
             print(ct)
-            
+            print("Test Accuracy = {}".format(correct/float(total)))
 
         # Calculate final accuracy
         final_acc = correct / float(len(self.dataloader))
