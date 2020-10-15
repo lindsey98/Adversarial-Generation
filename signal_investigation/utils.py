@@ -3,9 +3,11 @@ import torch.nn as nn
 import torch
 from torchvision import transforms
 import torchvision
-import os
-from models.vgg import VGG11
 from dataloader import *
+import os
+os.chdir('..')
+from models.vgg import VGG11
+
 
     
 def load_model(weights_path, device):

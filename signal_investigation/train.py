@@ -8,10 +8,11 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from torch.autograd import Variable
 import time
+from dataloader import *
 import os
+os.chdir('..')
 from torchvision import transforms
 import shutil
-from dataloader import *
 from models.vgg import VGG11
 
 
