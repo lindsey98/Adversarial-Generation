@@ -9,8 +9,7 @@ import numpy as np
 import copy
 
 def reduce_sum(x, keepdim=True):
-    '''Helper function Perform sum on all dimension except for batch dim
-    '''
+    '''Helper function Perform sum on all dimension except for batch dim'''
     for a in reversed(range(1, x.dim())):
         x = x.sum(a, keepdim=keepdim)
     return x
@@ -18,30 +17,26 @@ def reduce_sum(x, keepdim=True):
 
 
 def l2_dist(x, y, keepdim=True):
-    '''Helper function Compute L2-dist
-    '''
+    '''Helper function Compute L2-dist'''
     d = (x - y)**2
     return reduce_sum(d, keepdim=keepdim)
 
 
 
 def torch_arctanh(x, eps=1e-6):
-    '''Helper function Implement arctanh function
-    '''
+    '''Helper function Implement arctanh function'''
     x *= (1. - eps)
     return (torch.log((1 + x) / (1 - x))) * 0.5
 
 
 
 def tanh_rescale(x, x_min=0., x_max=1.):
-    '''Helper function Implement tanh function
-    '''
+    '''Helper function Implement tanh function'''
     return (torch.tanh(x) + 1) * 0.5 * (x_max - x_min) + x_min
 
 
 def compare(output, target):
-    '''Helper function Compare predicted value with ground-truth
-    '''
+    '''Helper function Compare predicted value with ground-truth'''
     if not isinstance(output, (float, int, np.int64)):
         output = np.copy(output)
         output[target] -= confidence
@@ -51,8 +46,7 @@ def compare(output, target):
 
 
 def cal_loss(output, target, dist, scale_const):
-    '''Helper function Compute loss for C&W L2
-    '''
+    '''Helper function Compute loss for C&W L2'''
     # compute the probability of the label class versus the maximum other
     real = (target * output).sum(1)
     other = ((1. - target) * output - target * 10000.).max(1)[0]
@@ -69,9 +63,7 @@ def cal_loss(output, target, dist, scale_const):
 
 
 def optimize(model, optimizer, input_var, modifier_var, target_var, scale_const_var, input_orig=None):
-    '''Helper function
-       Optimize C&W L2 loss by Adam
-    '''
+    '''Helper function Optimize C&W L2 loss by Adam'''
     # apply modifier and clamp resulting image to keep bounded from clip_min to clip_max
     input_adv = tanh_rescale(modifier_var + input_var, clip_min, clip_max)
     output = model(x)

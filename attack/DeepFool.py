@@ -34,7 +34,7 @@ def deepfool(model, num_classes, image, label, I, overshoot=0.02, max_iter=100, 
     k_i = label
 
     # Stop until attack is successful or reach the maximum iterations
-    while k_i == label and loop_i < max_iter:
+    while k_i == label:
 
         pert = np.inf
         zero_gradients(x)

@@ -63,8 +63,9 @@ def jsma(model, num_classes, image, target, max_iter=100, clip_min=-1.0, clip_ma
     label = output.max(1, keepdim=True)[1]
 
     count = 0
+    
     # if attack is successful or reach the maximum number of iterations
-    while (count < max_iter) and (label != target):
+    while label != target:
 
         # Skip the pixels that have been attacked before
         search_space = (x.data[0].sum(0) > clip_min*x.data.shape[1]) & (x.data[0].sum(0) < clip_max*x.data.shape[1])
