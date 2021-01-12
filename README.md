@@ -1,5 +1,5 @@
-# Network_Signal
-Investigate the distribution of signal
+# Adversarial generation
+Implementation of adv attacks
 
 # Background
 We believe that for normal examples and adversarial examples. The triggering patterns for internal NN layer are significantly different. In this repository, we aim to verify this hypothesis. 
