@@ -66,7 +66,7 @@ def optimize(model, optimizer, input_var, modifier_var, target_var, scale_const_
     '''Helper function Optimize C&W L2 loss by Adam'''
     # apply modifier and clamp resulting image to keep bounded from clip_min to clip_max
     input_adv = tanh_rescale(modifier_var + input_var, clip_min, clip_max)
-    output = model(x)
+    output = model(input_adv)
 
     # distance to the original input data
     if input_orig is None:
@@ -77,7 +77,6 @@ def optimize(model, optimizer, input_var, modifier_var, target_var, scale_const_
     loss = cal_loss(output, target_var, dist, scale_const_var)
 
     optimizer.zero_grad()
-    model.zero_grad()
     loss.backward()
     optimizer.step()
 
@@ -95,7 +94,7 @@ def cw(model, num_classes, device, image, target, max_steps=1000, clip_min=-1.0,
        C&W L2 attack
        Parameters:
            image: input image
-           target: adv target class
+           target: label class
            max_steps: maximum iterations of optimization
            clip_min, clip_max: clip image into legal range
     '''
