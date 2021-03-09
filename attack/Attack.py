@@ -76,11 +76,7 @@ class adversarial_attack():
                 perturbed_data = deepfool(self.model, self.num_classes, data, label, I)
                 
             elif self.method == 'cw':
-                # randomly select a target class
-                target_class = init_pred
-                while target_class == init_pred:
-                    target_class = torch.randint(0, output.size()[1], (1,)).to(self.device)
-                perturbed_data = cw(self.model, self.num_classes, self.device, data, target_class)
+                perturbed_data = cw(self.model, self.num_classes, self.device, data, label)
                 
             else:
                 print('Attack method is not supported， please choose your attack from [fgsm|stepll|jsma|deepfool|cw]')
